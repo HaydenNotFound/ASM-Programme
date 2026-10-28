@@ -13,6 +13,7 @@ default rel
 %define STD_OUTPUT_HANDLE -11
 %define STD_INPUT_HANDLE -10
 
+extern GetLastError
 extern GetStdHandle
 extern WriteConsoleW
 extern ReadConsoleW
@@ -73,6 +74,7 @@ main:
         cmp rax, -1
         je .fail
         mov [stdout_handle], rax
+        jmp WriteTextInConsole
 
         .fail:
             mov ecx, 1                      ; код завершения 1
@@ -95,6 +97,7 @@ main:
         call WriteConsoleW
         test eax, eax
         jz .fail
+        jmp GetStdINHandle
 
         .fail:
             mov ecx, 2                      ; код завершения 2
@@ -118,6 +121,7 @@ main:
         cmp rax, -1
         je .fail
         mov [stdin_handle], rax
+        jmp ReadTextFromConsole
 
         .fail:
             mov ecx, 3                      ; код завершения 3
@@ -143,6 +147,7 @@ main:
         call ReadConsoleW
         test eax, eax
         jz .fail
+        jmp trim_done
 
         .fail:
             mov ecx, 4                      ; код завершения 4
@@ -152,32 +157,7 @@ main:
 
 
 
-    ; ------ удаляем завершающие CR/LF < начало кода > ------
-
-    mov eax, [chars_read]
-    test eax, eax
-    jz .trim_done
-
-    cmp word [input_buffer + rax*2 - 2], 10
-    jne .check_cr
-    dec eax
-
-    .check_cr:
-        test eax, eax
-        jz .store_count
-        cmp word [input_buffer + rax*2 - 2], 13
-        jne .store_count
-        dec eax
-
-    .store_count:
-        mov [chars_read], eax
-    
-    ; ------ удаляем завершающие CR/LF < конец кода > ------
-
-
-
-
-    .trim_done:
+    trim_done:
     ; Открыть существующий файл или создать новый.
     lea rcx, [file_name]
     mov edx, 0x00000004             ; FILE_APPEND_DATA
