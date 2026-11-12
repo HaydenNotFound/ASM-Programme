@@ -1,32 +1,119 @@
-; программа на ассемблере для Windows x64
-; запрашивает у пользователя ввод строки, сохраняет её в файл output.txt в кодировке UTF-16LE с BOM
-; если такая строка уже есть выводит предупреждение
-; способ запуска и сборки через терминал:
-;
-; nasm -f win64 programme.asm -o programme.obj
-; .\GoLink /console /entry:main /fo=programme.exe programme.obj kernel32.dll
-; .\programme.exe
-;
+; получение hex представления exe-файла и запись его в текстовый файл
+; $bytes = [System.IO.File]::ReadAllBytes(".\trial period.exe"); $hex = [System.BitConverter]::ToString($bytes).Replace("-", ""); [System.IO.File]::WriteAllText(".\trial period.hex.txt", $hex)
+; вписать нужные байты в файл можно добавив 
+
 
 bits 64
 default rel
 
-%define STD_OUTPUT_HANDLE -11
-%define STD_INPUT_HANDLE -10
-
-extern GetLastError
-extern GetStdHandle
-extern WriteConsoleW
-extern ReadConsoleW
 extern CreateFileA
-extern WriteFile
+extern GetFileSizeEx
+extern ReadFile
 extern CloseHandle
 extern ExitProcess
-extern GetFileSizeEx
+extern GetStdHandle
+extern WriteConsoleW
+extern WriteConsoleA
+extern GetLocalTime
+extern WriteFile
+extern SetFilePointerEx
+extern CreateThread
+extern Sleep
+extern GetLastError
+extern ReadConsoleW
 extern SetFilePointerEx
 extern ReadFile
 
+
+%define STD_OUTPUT_HANDLE -11
+%define STD_INPUT_HANDLE -10
+%define GENERIC_READ 0x80000000
+%define FILE_SHARE_READ 1
+%define OPEN_ALWAYS 4
+%define FILE_ATTRIBUTE_NORMAL 0x80
+%define BUFFER_SIZE 65536
+%define GENERIC_WRITE 0x40000000
+%define FILE_ATTRIBUTE_HIDDEN 0x2
+%define FILE_APPEND_DATA 0x00000004
+%define FILE_BEGIN 0
+
+
+%macro PUT2 1
+    movzx eax, word [system_time + %1]
+    xor edx, edx
+    mov ecx, 10
+    div ecx
+    add al, '0'
+    mov [rdi], al
+    add dl, '0'
+    mov [rdi + 1], dl
+    add rdi, 2
+%endmacro
+
+%macro PUT3 1
+    movzx eax, word [system_time + %1]
+    xor edx, edx
+    mov ecx, 100
+    div ecx
+    add al, '0'
+    mov [rdi], al
+
+    mov eax, edx
+    xor edx, edx
+    mov ecx, 10
+    div ecx
+    add al, '0'
+    mov [rdi + 1], al
+    add dl, '0'
+    mov [rdi + 2], dl
+    add rdi, 3
+%endmacro
+
+%macro PUT4YEAR 0
+    movzx eax, word [system_time]
+    xor edx, edx
+    mov ecx, 1000
+    div ecx
+    add al, '0'
+    mov [rdi], al
+
+    mov eax, edx
+    xor edx, edx
+    mov ecx, 100
+    div ecx
+    add al, '0'
+    mov [rdi + 1], al
+
+    mov eax, edx
+    xor edx, edx
+    mov ecx, 10
+    div ecx
+    add al, '0'
+    mov [rdi + 2], al
+    add dl, '0'
+    mov [rdi + 3], dl
+    add rdi, 4
+%endmacro
+
 section .data
+    file_name db "C:\Users\User\Downloads\N0va Desсktop_2023-01-06.log", 0
+
+    needle    db "A455448427BA5D64CC71F528A2226DC4E41C36EA5464154EF1244C416984C4BF"
+    needle_chars equ ($ - needle)
+
+    log_suffix db "] [info] [thread: 11988] MSG_UPDATE_DXWIN PlayWindow Hwnd is: "
+               db "A455448427BA5D64CC71F528A2226DC4E41C36EA5464154EF1244C416984C4BF"
+               db 13, 10
+    log_suffix_len equ $ - log_suffix
+
+    msg db "The programme has been launched on this device more than three times. You have reached the end of your trial period; please purchase the paid version.", 0
+    msg_len equ ($ - msg)  
+    
+    msg_time db "The programme ran for longer than the specified trial period. It was forcibly terminated. This attempt to use the programme was blocked.", 0
+    msg_time_len equ ($ - msg_time - 1)
+
+    file_offset dq 0
+
     prompt:
         dw 0x0412, 0x0432, 0x0435, 0x0434, 0x0438, 0x0442, 0x0435         ; "Введите"
         dw 0x0020                                                         ; " "
@@ -34,10 +121,8 @@ section .data
         dw 0x0020, 0x003A, 0x0020                                         ; " : "
     prompt_chars equ ($ - prompt) / 2
 
-    file_name db "output.txt", 0
+    file_name_prg db "output.txt", 0
     utf16_bom  db 0xFF, 0xFE
-
-    file_offset dq 0
 
     already_message:
         dw 0x0421, 0x0442, 0x0440, 0x043E, 0x043A, 0x0430 ; Строка
@@ -49,22 +134,32 @@ section .data
     already_message_chars equ ($ - already_message) / 2
 
 section .bss
-    align 8
+    alignb 8
+    file_handle         resq 1
+    file_size           resq 1
+    bytes_read          resd 1
+    error_code          resd 1
+    bytes_written       resd 1
+    occurrence_count    resd 1
+    buffer              resb BUFFER_SIZE
+    system_time         resw 8
+    log_buffer          resb 256
+    console_written     resd 1
+
+
+    alignb 8
     stdin_handle  resq 1
     stdout_handle resq 1
-    file_handle   resq 1
 
     chars_read    resd 1
-    bytes_written resd 1
 
-    align 2
+    alignb 2
     input_buffer  resw 256
 
-    file_size       resq 1
     file_bytes_read resd 1
     search_chars    resd 1
 
-    align 2
+    alignb 2
     search_buffer   resb 1048576
 
     failure_stage resd 1
@@ -73,7 +168,241 @@ section .text
     global main
 
 main:
+    sub rsp, 56
+
+    ; ------ Запуск потока для ожидания полторы минуты < начало кода > -----
+
+    ; Запустить таймерный поток
+    xor ecx, ecx
+    xor edx, edx
+    lea r8, [timeout_thread]
+    xor r9d, r9d
+    mov qword [rsp + 32], 0
+    mov qword [rsp + 40], 0
+    call CreateThread
+
+    test rax, rax
+    jnz .timer_created
+
+    ; CreateThread не создал поток
+    mov ecx, 5
+    call ExitProcess
+
+.timer_created:
+    ; Закрытие дескриптора не останавливает сам поток
+    mov rcx, rax
+    call CloseHandle
+
+    ; ------ Запуск потока для ожидания полторы минуты < конец кода > -----
+
+
+    ; ------ Создать файл (скрытый), если он не существует, и открыть его для чтения и записи  < начало кода > ----- 
+
+    lea rcx, [file_name]
+    mov edx, GENERIC_READ | FILE_APPEND_DATA
+    mov r8d, FILE_SHARE_READ
+    xor r9d, r9d
+    mov dword [rsp + 32], OPEN_ALWAYS
+    mov dword [rsp + 40], FILE_ATTRIBUTE_HIDDEN
+    mov qword [rsp + 48], 0
+    call CreateFileA
+
+    ; ------ Создать файл (скрытый), если он не существует, и открыть его для чтения и записи  < конец кода > -----
+
+    cmp rax, -1                                                                               ; ошибка при открытии файла
+    mov [error_code], 1                                                                       ; обозначение ошибки в первом вызове функции CreateFileA
+    je .error                                                                                 ; прыжок к метке с кодом завершения 255
+    mov [file_handle], rax
+
+    ; ------ Получить местные дату и время < начало кода > ------
+
+    lea rcx, [system_time]
+    call GetLocalTime
     
+    ; ------ Получить местные дату и время < конец кода > ------
+
+    ; ------ Сформировать строку для записи в файл < начало кода > ------
+
+    ; Сформировать [гггг-мм-дд чч:мм:сс.мсс]
+    lea rdi, [log_buffer]
+    mov byte [rdi], '['
+    inc rdi
+
+    PUT4YEAR
+    mov byte [rdi], '-'
+    inc rdi
+    PUT2 2                                                                                    ; месяц
+    mov byte [rdi], '-'
+    inc rdi
+    PUT2 6                                                                                    ; день
+    mov byte [rdi], ' '
+    inc rdi
+    PUT2 8                                                                                    ; часы
+    mov byte [rdi], ':'
+    inc rdi
+    PUT2 10                                                                                   ; минуты
+    mov byte [rdi], ':'
+    inc rdi
+    PUT2 12                                                                                   ; секунды
+    mov byte [rdi], '.'
+    inc rdi
+    PUT3 14                                                                                   ; миллисекунды
+
+    ; Добавить оставшуюся часть строки и перевод строки.
+    lea rsi, [log_suffix]
+    mov ecx, log_suffix_len
+    rep movsb
+
+    ; ------ Сформировать строку для записи в файл < конец кода > ------
+
+    ; ------ Записать сформированную строку в конец файла < начало кода > ------
+
+    mov rcx, [file_handle]
+    lea rdx, [log_buffer]
+    mov r8, rdi
+    sub r8, rdx
+    lea r9, [bytes_written]
+    mov qword [rsp + 32], 0
+    call WriteFile
+
+    test eax, eax
+    mov [error_code], 2                                                                       ; Обозначение ошибки при вызове функции WriteFile для записи скрытого лога 
+    jz .write_error
+
+    ; ------ Записать сформированную строку в конец файла < конец кода > ------
+
+    ; ------ Получить размер файла < начало кода >------
+
+    mov rcx, [file_handle]
+    lea rdx, [file_size]
+    call GetFileSizeEx
+
+    ; ------ Получить размер файла < конец кода >------
+
+    test eax, eax
+    jz .close_error
+
+    ; Буфер вмещает не более BUFFER_SIZE байт.
+    cmp qword [file_size], BUFFER_SIZE
+    ja .close_error
+
+    mov rcx, [file_handle]
+    xor edx, edx                                                                              ; смещение 0
+    xor r8d, r8d                                                                              ; lpNewFilePointer = NULL
+    mov r9d, FILE_BEGIN
+    call SetFilePointerEx
+    test eax, eax
+    jz .close_error
+
+    ; Прочитать файл.
+    mov rcx, [file_handle]
+    lea rdx, [buffer]
+    mov r8d, [file_size]
+    lea r9, [bytes_read]
+    mov qword [rsp + 32], 0
+    call ReadFile
+    test eax, eax
+    jz .close_error
+
+    ; Если файл короче искомой строки, совпадений нет.
+    mov eax, [bytes_read]
+    cmp eax, needle_chars
+    jb .finish_count
+
+    ; r8d — последний допустимый индекс начала совпадения.
+    mov r8d, eax
+    sub r8d, needle_chars
+    xor r10d, r10d                                                                            ; индекс начала поиска
+
+.search_start:
+    cmp r10d, r8d
+    ja .finish_count
+
+    xor r11d, r11d                                                                            ; индекс символа в needle
+
+.compare_chars:
+    cmp r11d, needle_chars
+    jae .match
+
+    mov eax, r10d
+    add eax, r11d
+    mov dl, [buffer + rax]
+    cmp dl, [needle + r11]
+    jne .next_start
+
+    inc r11d
+    jmp .compare_chars
+
+.match:
+    inc dword [occurrence_count]
+    cmp dword [occurrence_count], 3
+    ja .finish_count                                                                          ; найдено больше трёх — закрыть файл и завершить
+
+.next_start:
+    inc r10d                                                                                  ; шаг на 1 байт позволяет считать перекрытия
+    jmp .search_start
+
+.finish_count:
+    mov rcx, [file_handle]
+    call CloseHandle
+
+    mov ecx, [occurrence_count]                                                               ; код завершения: количество, максимум 4
+    cmp ecx, 3
+    ja .more_than_three
+    jmp main_programm
+
+.close_error:
+    mov rcx, [file_handle]
+    call CloseHandle
+
+.error:
+    mov ecx, [error_code]                                                                     ; код ошибки, по номеру можно посмотреть место возникновения ошибки
+    call ExitProcess
+
+.more_than_three:
+    mov ecx, STD_OUTPUT_HANDLE
+    call GetStdHandle
+    mov rcx, rax
+    lea rdx, [msg]
+    mov r8d, msg_len
+    dec r8d                                                                                   ; не выводить завершающий ноль
+    lea r9, [console_written]
+    mov qword [rsp + 32], 0
+    call WriteConsoleA
+    
+    mov ecx, 4                                                                                ; код завершения: больше трёх
+    call ExitProcess
+
+
+.write_error:
+    mov rcx, [file_handle]
+    call CloseHandle
+
+timeout_thread:
+    timeout_thread:
+    sub rsp, 40
+    mov ecx, 90000
+    call Sleep
+
+    mov ecx, STD_OUTPUT_HANDLE
+    call GetStdHandle
+    mov rcx, rax
+    lea rdx, [msg_time]
+    mov r8d, msg_time_len
+    lea r9, [console_written]
+    mov qword [rsp + 32], 0
+    call WriteConsoleA
+
+    xor ecx, ecx
+    call ExitProcess
+
+
+
+; ----------------------------------------------------------------------------------------------------------------
+
+
+main_programm:
+
     ; порядок передачи аргументов в Windows x64 ABI:
     ; rcx - 1-й аргумент
     ; rdx - 2-й аргумент
@@ -81,7 +410,7 @@ main:
     ; r9  - 4-й аргумент
     ; дальше через стек (push)
 
-    sub rsp, 72
+    sub rsp, 64
 
     ; ------ получаем дескриптор стандартного потока вывода < начало кода > ------
 
@@ -205,10 +534,10 @@ main:
     ; ------ открываем или создаём файл < начало кода > ------
     
     ; Функция открытия или создания файла в режиме OPEN_ALWAYS с правом добавления данных в конец в Windows x64 ABI
-    ; аргументы на ввод перед вызовом функции: file_name
-    ; file_name - имя файла, который нужно открыть или создать, пеердается в rcx
+    ; аргументы на ввод перед вызовом функции: file_name_prg
+    ; file_name_prg - имя файла, который нужно открыть или создать, пеердается в rcx
     ; результат возвращается в file_handle
-        lea rcx, [file_name]
+        lea rcx, [file_name_prg]
     OpenAnExistingFile:
         mov edx, 0x80000004              ; GENERIC_READ | FILE_APPEND_DATA
         xor r8d, r8d                     ; dwShareMode = 0
